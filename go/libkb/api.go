@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"runtime"
 	"strings"
@@ -157,9 +158,9 @@ func (api *BaseAPIEngine) PrepareMethodWithBody(method string, url1 url.URL, arg
 		if err != nil {
 			return nil, err
 		}
-		body = ioutil.NopCloser(strings.NewReader(string(jsonString)))
+		body = bytes.NewReader(jsonString)
 	} else {
-		body = ioutil.NopCloser(strings.NewReader(arg.getHTTPArgs().Encode()))
+		body = strings.NewReader(arg.getHTTPArgs().Encode())
 	}
 
 	req, err := http.NewRequest(method, ruri, body)
@@ -174,7 +175,7 @@ func (api *BaseAPIEngine) PrepareMethodWithBody(method string, url1 url.URL, arg
 		typ = "application/x-www-form-urlencoded; charset=utf-8"
 	}
 
-	req.Header.Add("Content-Type", typ)
+	req.Header.Set("Content-Type", typ)
 	return req, nil
 }
 
@@ -373,6 +374,14 @@ func doRetry(ctx context.Context, g Contextifier, arg APIArg, cli *Client, req *
 			g.G().Log.CDebugf(ctx, "retry loop aborting since chat went offline")
 			break
 		}
+
+		if req.GetBody != nil {
+			// post request body consumed, need to get it back
+			req.Body, err = req.GetBody()
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 
 	return nil, nil, fmt.Errorf("doRetry failed, attempts: %d, timeout %s, last err: %s", retries, timeout, lastErr)
@@ -553,7 +562,7 @@ func (a *InternalAPIEngine) fixHeaders(arg APIArg, req *http.Request) error {
 
 		if a.G().Env.GetTorMode().UseSession() {
 			if len(tok) > 0 {
-				req.Header.Add("X-Keybase-Session", tok)
+				req.Header.Set("X-Keybase-Session", tok)
 			} else if arg.SessionType == APISessionTypeREQUIRED {
 				a.G().Log.Warning("fixHeaders: need session, but session token empty")
 				return InternalError{Msg: "API request requires session, but session token empty"}
@@ -561,7 +570,7 @@ func (a *InternalAPIEngine) fixHeaders(arg APIArg, req *http.Request) error {
 		}
 		if a.G().Env.GetTorMode().UseCSRF() {
 			if len(csrf) > 0 {
-				req.Header.Add("X-CSRF-Token", csrf)
+				req.Header.Set("X-CSRF-Token", csrf)
 			} else if arg.SessionType == APISessionTypeREQUIRED {
 				a.G().Log.Warning("fixHeaders: need session, but session csrf empty")
 				return InternalError{Msg: "API request requires session, but session csrf empty"}
@@ -825,6 +834,13 @@ func (a *InternalAPIEngine) Delete(arg APIArg) (*APIRes, error) {
 }
 
 func (a *InternalAPIEngine) DoRequest(arg APIArg, req *http.Request) (*APIRes, error) {
+
+	dump, err := httputil.DumpRequestOut(req, true)
+	if err != nil {
+		return nil, err
+	}
+	a.G().Log.Warning("DoRequest initial request: %q", dump)
+
 	res, reqErr := a.doRequest(arg, req)
 	if reqErr == nil {
 		return res, nil
@@ -836,7 +852,21 @@ func (a *InternalAPIEngine) DoRequest(arg APIArg, req *http.Request) (*APIRes, e
 
 	a.G().Log.CDebugf(arg.NetContext, "| API call %s session refreshed, trying again", arg.Endpoint)
 
-	res, err := a.doRequest(arg, req)
+	if req.GetBody != nil {
+		// post request body consumed, need to get it back
+		req.Body, err = req.GetBody()
+		if err != nil {
+			return res, err
+		}
+	}
+
+	dump, err = httputil.DumpRequestOut(req, true)
+	if err != nil {
+		return nil, err
+	}
+	a.G().Log.Warning("DoRequest refresh request: %q", dump)
+
+	res, err = a.doRequest(arg, req)
 	if err == nil {
 		a.G().Log.CDebugf(arg.NetContext, "| API call %s success after refresh", arg.Endpoint)
 		return res, nil
